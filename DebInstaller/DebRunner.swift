@@ -58,13 +58,17 @@ enum DebRunner {
         posix_spawn_file_actions_addclose(&fileActions, errPipe.fileHandleForReading.fileDescriptor)
 
         var pid: pid_t = -1
-        let envp = ProcessInfo.processInfo.environment
-            .map { "\($0.key)=\($0.value)" }
-            .map { strdup($0) } + [nil]
-        defer { for p in envp where p != nil { free(p) } }
-        var mutableEnvp = envp
+        var envp: [UnsafeMutablePointer<CChar>?] = ProcessInfo.processInfo.environment.map { kv in
+            strdup("\(kv.key)=\(kv.value)")
+        }
+        envp.append(nil)
+        defer {
+            for p in envp {
+                if let p = p { free(p) }
+            }
+        }
 
-        let rc = posix_spawn(&pid, binary, &fileActions, nil, argv, &mutableEnvp)
+        let rc = posix_spawn(&pid, binary, &fileActions, nil, argv, &envp)
 
         // Cerrar los extremos de escritura en el padre para que read() devuelva EOF
         try? outPipe.fileHandleForWriting.close()
