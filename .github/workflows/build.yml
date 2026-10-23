@@ -1,0 +1,48 @@
+name: Build DebInstaller.ipa (unsigned)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build Release (unsigned)
+        run: |
+          set -e
+          xcodebuild \
+            -project DebInstaller.xcodeproj \
+            -scheme DebInstaller \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            clean build
+
+      - name: Package as .ipa
+        run: |
+          cd build/Build/Products/Release-iphoneos
+          mkdir -p Payload
+          cp -r DebInstaller.app Payload/
+          zip -qr DebInstaller-unsigned.ipa Payload
+          ls -lh DebInstaller-unsigned.ipa
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DebInstaller-unsigned-ipa
+          path: build/Build/Products/Release-iphoneos/DebInstaller-unsigned.ipa
+          retention-days: 30

@@ -1,0 +1,42 @@
+name: DebInstaller
+options:
+  bundleIdPrefix: com.rcolinzarate
+  deploymentTarget:
+    iOS: "15.0"
+  developmentLanguage: es
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    PRODUCT_BUNDLE_IDENTIFIER: com.rcolinzarate.debinstaller
+
+targets:
+  DebInstaller:
+    type: application
+    platform: iOS
+    sources:
+      - path: DebInstaller
+        excludes:
+          - Info.plist
+          - "**/*.entitlements"
+          - "embedded/*.deb"
+    info:
+      path: DebInstaller/Info.plist
+    resources:
+      - path: DebInstaller/embedded
+        optional: true
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.rcolinzarate.debinstaller
+      PRODUCT_NAME: DebInstaller
+    frameworks:
+      - UIKit
+      - UniformTypeIdentifiers
