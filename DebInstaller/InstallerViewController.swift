@@ -133,9 +133,21 @@ final class InstallerViewController: UIViewController, UIDocumentPickerDelegate 
     }
 
     @objc private func installEmbedded() {
-        guard let url = Bundle.main.urls(forResourcesWithExtension: "deb", subdirectory: nil)?.first else {
-            log("❌ No hay .deb embebido en el bundle de la app.")
-            log("   (para embeber: pon el archivo en DebInstaller/embedded/*.deb antes de compilar)")
+        // xcodegen pone resources en subcarpeta "embedded/". Buscar en ambos lugares.
+        let candidates: [URL?] = [
+            Bundle.main.url(forResource: "siseos", withExtension: "deb", subdirectory: "embedded"),
+            Bundle.main.url(forResource: "siseos", withExtension: "deb", subdirectory: nil),
+            Bundle.main.urls(forResourcesWithExtension: "deb", subdirectory: "embedded")?.first,
+            Bundle.main.urls(forResourcesWithExtension: "deb", subdirectory: nil)?.first,
+        ]
+        guard let url = candidates.compactMap({ $0 }).first else {
+            log("❌ No hay .deb embebido en el bundle.")
+            log("   (busqué en raíz y en subdir 'embedded/')")
+            log("   Bundle path: \(Bundle.main.bundlePath)")
+            // Lista todo lo que hay en el bundle para diagnosticar
+            if let items = try? FileManager.default.contentsOfDirectory(atPath: Bundle.main.bundlePath) {
+                log("   Contenido del bundle: \(items.joined(separator: ", "))")
+            }
             return
         }
         log("📦 .deb embebido encontrado: \(url.lastPathComponent)")
@@ -202,15 +214,12 @@ final class InstallerViewController: UIViewController, UIDocumentPickerDelegate 
         log("⚙️  Instalando: \(deb.lastPathComponent)")
         DispatchQueue.global().async { [weak self] in
             let result = DebRunner.installDeb(from: deb)
-            self?.log("--- stdout ---")
-            self?.log(result.stdout.isEmpty ? "(vacío)" : result.stdout)
-            self?.log("--- stderr ---")
-            self?.log(result.stderr.isEmpty ? "(vacío)" : result.stderr)
+            self?.log(result.combinedLog)
             self?.log("--- exit code: \(result.exitCode) ---")
             if result.ok {
                 self?.log("✅ Instalación OK. Haz respring (Dopamine → Reiniciar SpringBoard) para activar el tweak.")
             } else {
-                self?.log("❌ Instalación falló (ver stderr arriba).")
+                self?.log("❌ Instalación falló (ver log arriba).")
             }
         }
     }

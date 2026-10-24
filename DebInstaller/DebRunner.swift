@@ -1,174 +1,158 @@
 //
 //  DebRunner.swift
-//  Ejecuta dpkg/apt sobre un .deb usando los binarios del jailbreak Dopamine.
-//
-//  No requiere libjailbreak.dylib ni entitlements especiales — en Dopamine
-//  los binarios en /var/jb/usr/bin/ corren con los privilegios heredados del
-//  caller. Como la app es sideloaded sobre un sistema con systemhook inyectado,
-//  posix_spawn hereda el contexto rootless y dpkg puede escribir en /var/jb/.
+//  v0.1.1 — usa libjailbreak.dylib (exec_cmd_root) en vez de posix_spawn.
+//           La sandbox iOS bloquea posix_spawn aunque haya jailbreak; hay que ir
+//           vía jbd (jailbreakd) con las funciones de libjailbreak de Dopamine.
 //
 
 import Foundation
 import Darwin
 import UIKit
+import MachO
 
 enum DebRunner {
 
-    /// Rutas típicas donde Dopamine instala dpkg (rootless jailbreak).
     static let dpkgCandidates = [
         "/var/jb/usr/bin/dpkg",
         "/var/jb/usr/local/bin/dpkg",
-        "/usr/bin/dpkg"
     ]
 
     static func findDpkg() -> String? {
-        for p in dpkgCandidates {
-            if FileManager.default.fileExists(atPath: p) {
-                return p
-            }
-        }
+        for p in dpkgCandidates where FileManager.default.fileExists(atPath: p) { return p }
         return nil
     }
 
-    /// Resultado estructurado de una invocación.
     struct Result {
         let exitCode: Int32
-        let stdout: String
-        let stderr: String
+        let combinedLog: String
         var ok: Bool { exitCode == 0 }
     }
 
-    /// Ejecuta un comando capturando stdout+stderr. Hereda env.
-    static func run(_ binary: String, args: [String], timeoutSec: Int = 120) -> Result {
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-
-        var argv: [UnsafeMutablePointer<CChar>?] = [strdup(binary)]
-        for a in args { argv.append(strdup(a)) }
-        argv.append(nil)
-        defer { for p in argv where p != nil { free(p) } }
-
-        var fileActions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&fileActions)
-        defer { posix_spawn_file_actions_destroy(&fileActions) }
-
-        posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 1)
-        posix_spawn_file_actions_adddup2(&fileActions, errPipe.fileHandleForWriting.fileDescriptor, 2)
-        posix_spawn_file_actions_addclose(&fileActions, outPipe.fileHandleForReading.fileDescriptor)
-        posix_spawn_file_actions_addclose(&fileActions, errPipe.fileHandleForReading.fileDescriptor)
-
-        var pid: pid_t = -1
-        var envp: [UnsafeMutablePointer<CChar>?] = ProcessInfo.processInfo.environment.map { kv in
-            strdup("\(kv.key)=\(kv.value)")
-        }
-        envp.append(nil)
-        defer {
-            for p in envp {
-                if let p = p { free(p) }
-            }
-        }
-
-        let rc = posix_spawn(&pid, binary, &fileActions, nil, argv, &envp)
-
-        // Cerrar los extremos de escritura en el padre para que read() devuelva EOF
-        try? outPipe.fileHandleForWriting.close()
-        try? errPipe.fileHandleForWriting.close()
-
-        guard rc == 0 else {
-            return Result(exitCode: -1, stdout: "",
-                          stderr: "posix_spawn falló: rc=\(rc) errno=\(errno) (\(String(cString: strerror(errno))))")
-        }
-
-        var status: Int32 = 0
-        let deadline = Date().addingTimeInterval(TimeInterval(timeoutSec))
-
-        // Leer en paralelo mientras esperamos
-        let outGroup = DispatchGroup()
-        var outData = Data()
-        var errData = Data()
-        outGroup.enter(); outGroup.enter()
-        DispatchQueue.global().async {
-            outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-            outGroup.leave()
-        }
-        DispatchQueue.global().async {
-            errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            outGroup.leave()
-        }
-
-        while Date() < deadline {
-            let wpid = waitpid(pid, &status, WNOHANG)
-            if wpid == pid { break }
-            if wpid < 0 { break }
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        outGroup.wait()
-
-        let actualExit = (status & 0xff00) >> 8
-        return Result(exitCode: Int32(actualExit),
-                      stdout: String(data: outData, encoding: .utf8) ?? "",
-                      stderr: String(data: errData, encoding: .utf8) ?? "")
-    }
-
-    /// Instala un .deb vía dpkg -i. El archivo debe estar en una ruta que dpkg pueda leer
-    /// (no en el sandbox de la app). Copiamos a /tmp primero.
+    /// Instala un .deb vía exec_cmd_root → dpkg.
+    /// Redirige stdout/stderr de dpkg a un archivo en /var/jb/tmp/ (escribible por root)
+    /// y luego lee ese archivo desde la app (que SÍ puede leer /var/jb/...).
     static func installDeb(from url: URL) -> Result {
         guard let dpkg = findDpkg() else {
-            return Result(exitCode: -2, stdout: "",
-                          stderr: "dpkg no encontrado. Busqué en:\n" +
-                                  dpkgCandidates.joined(separator: "\n") +
-                                  "\n\nVerifica que tu jailbreak Dopamine esté activo y /var/jb/usr/bin/dpkg exista.")
+            return Result(exitCode: -800, combinedLog: "❌ dpkg no encontrado en /var/jb/usr/bin/ ni /var/jb/usr/local/bin/")
         }
 
-        // Copiar el .deb a /tmp donde dpkg sí puede leer (fuera del sandbox app)
-        let tmpPath = "/tmp/debinstaller_\(Int(Date().timeIntervalSince1970))_\(url.lastPathComponent)"
+        // 1. Inicializar libjailbreak
+        var errbuf = [CChar](repeating: 0, count: 512)
+        let initRc = errbuf.withUnsafeMutableBufferPointer { bp in
+            djb_init_libjailbreak(bp.baseAddress, Int32(bp.count))
+        }
+        if initRc != 0 {
+            let msg = String(cString: errbuf)
+            return Result(exitCode: Int32(initRc),
+                          combinedLog: "❌ init libjailbreak falló (rc=\(initRc)): \(msg)\n" +
+                                       "¿Está Dopamine activo? ¿Hay /var/jb/basebin/libjailbreak.dylib?")
+        }
+
+        // 2. Copiar el .deb a /var/jb/tmp/ (dpkg lo lee desde ahí sin problemas sandbox)
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let debName = url.lastPathComponent.replacingOccurrences(of: " ", with: "_")
+        let targetPath = "/var/jb/tmp/debinst_\(timestamp)_\(debName)"
         do {
-            if FileManager.default.fileExists(atPath: tmpPath) {
-                try? FileManager.default.removeItem(atPath: tmpPath)
+            if FileManager.default.fileExists(atPath: targetPath) {
+                // Nos interesa limpiar previos del app para no crecer /var/jb/tmp
+                try? FileManager.default.removeItem(atPath: targetPath)
             }
-            try FileManager.default.copyItem(atPath: url.path, toPath: tmpPath)
+            // La app SÍ puede escribir a /var/jb/tmp si el jbroot está mounted con permisos
+            try FileManager.default.copyItem(atPath: url.path, toPath: targetPath)
         } catch {
-            // Si /tmp no es escribible por app sandbox, intentamos otra ruta
-            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            let fallback = docs.appendingPathComponent("to_install.deb").path
-            try? FileManager.default.removeItem(atPath: fallback)
-            try? FileManager.default.copyItem(atPath: url.path, toPath: fallback)
-            let r = run(dpkg, args: ["-i", fallback])
-            return r
+            // Si no, lo copiamos vía exec_cmd_root cp
+            let srcQuoted = url.path
+            let rc = djb_exec_root_cmd("/var/jb/bin/cp", srcQuoted, targetPath, nil, nil, nil, nil)
+            if rc != 0 {
+                return Result(exitCode: Int32(rc),
+                              combinedLog: "❌ No pude copiar .deb a /var/jb/tmp (rc=\(rc)): \(error.localizedDescription)")
+            }
         }
 
-        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+        // 3. Ejecutar dpkg -i <path> con stdout+stderr capturados en log
+        let logPath = "/var/jb/tmp/debinst_\(timestamp).log"
 
-        return run(dpkg, args: ["-i", tmpPath])
+        // Como exec_cmd_root no captura stdout, usamos sh -c "dpkg ... > logfile 2>&1"
+        let sh = "/var/jb/bin/sh"
+        let shellCmd = "\"\(dpkg)\" -i \"\(targetPath)\" > \"\(logPath)\" 2>&1"
+        let rc = djb_exec_root_cmd(sh, "-c", shellCmd, nil, nil, nil, nil)
+
+        // 4. Leer el log
+        var log = "exec_cmd_root returned: \(rc)\n"
+        if let logData = try? Data(contentsOf: URL(fileURLWithPath: logPath)),
+           let logStr = String(data: logData, encoding: .utf8) {
+            log += "\n--- dpkg output ---\n\(logStr)"
+        } else {
+            log += "\n(no se pudo leer el log en \(logPath) — probable que la app no tenga permisos de lectura ahí)"
+        }
+
+        // Limpiar
+        _ = djb_exec_root_cmd("/var/jb/bin/rm", "-f", targetPath, logPath, nil, nil, nil)
+
+        return Result(exitCode: Int32(rc), combinedLog: log)
     }
 
-    /// Diagnóstico: lista información del sistema que puede ayudar a debuggear.
+    /// Diagnóstico ampliado: incluye dylibs cargadas en el proceso para ver si systemhook está inyectado.
     static func systemInfo() -> String {
         var lines: [String] = []
-        lines.append("=== DebInstaller — info sistema ===")
+        lines.append("=== DebInstaller v0.1.1 — info sistema ===")
         lines.append("iOS: \(UIDevice.current.systemVersion)")
         lines.append("Device: \(UIDevice.current.model)")
         lines.append("Bundle: \(Bundle.main.bundleIdentifier ?? "?")")
         lines.append("")
+
         lines.append("=== dpkg path ===")
         for p in dpkgCandidates {
-            let exists = FileManager.default.fileExists(atPath: p)
-            lines.append("\(exists ? "✅" : "❌") \(p)")
+            let ok = FileManager.default.fileExists(atPath: p)
+            lines.append("\(ok ? "✅" : "❌") \(p)")
         }
         lines.append("")
+
         lines.append("=== /var/jb accesible? ===")
         let jbRoot = "/var/jb"
-        let jbExists = FileManager.default.fileExists(atPath: jbRoot)
-        lines.append("\(jbExists ? "✅" : "❌") \(jbRoot) existe")
-        if jbExists {
+        if FileManager.default.fileExists(atPath: jbRoot) {
+            lines.append("✅ \(jbRoot) existe")
             if let items = try? FileManager.default.contentsOfDirectory(atPath: jbRoot) {
-                lines.append("Contenido (primeros 10): \(items.prefix(10).joined(separator: ", "))")
+                lines.append("Contenido: \(items.prefix(10).joined(separator: ", "))")
+            }
+        } else {
+            lines.append("❌ \(jbRoot) NO existe — no hay jailbreak Dopamine activo")
+        }
+        lines.append("")
+
+        lines.append("=== libjailbreak.dylib ===")
+        let hasLj = djb_libjailbreak_available() == 1
+        lines.append("\(hasLj ? "✅" : "❌") /var/jb/basebin/libjailbreak.dylib")
+        if hasLj {
+            var buf = [CChar](repeating: 0, count: 512)
+            let r = buf.withUnsafeMutableBufferPointer { bp in
+                djb_init_libjailbreak(bp.baseAddress, Int32(bp.count))
+            }
+            lines.append("init libjailbreak: rc=\(r) \(r == 0 ? "✅ OK" : "❌ " + String(cString: buf))")
+            if r == 0, let jb = djb_jbroot() {
+                lines.append("jbroot reportado: \(String(cString: jb))")
             }
         }
         lines.append("")
-        lines.append("=== /tmp accesible? ===")
-        let tmpOK = FileManager.default.isWritableFile(atPath: "/tmp")
-        lines.append("\(tmpOK ? "✅" : "❌") /tmp escribible")
+
+        lines.append("=== dylibs inyectadas (buscar systemhook!) ===")
+        let count = _dyld_image_count()
+        var hits: [String] = []
+        for i in 0..<count {
+            if let cstr = _dyld_get_image_name(i) {
+                let p = String(cString: cstr)
+                if p.contains("jb/") || p.contains("dopamine") || p.contains("systemhook") || p.contains("ellekit") || p.contains("basebin") {
+                    hits.append(p)
+                }
+            }
+        }
+        if hits.isEmpty {
+            lines.append("⚠ NINGÚN dylib del jailbreak inyectado en esta app!")
+            lines.append("  (systemhook debería aparecer si Dopamine está inyectando)")
+        } else {
+            for h in hits { lines.append("✅ \(h)") }
+        }
+
         return lines.joined(separator: "\n")
     }
 }
