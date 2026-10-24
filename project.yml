@@ -8,8 +8,8 @@ options:
 
 settings:
   base:
-    MARKETING_VERSION: "0.1.2"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "0.1.3"
+    CURRENT_PROJECT_VERSION: "4"
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1,2"
     IPHONEOS_DEPLOYMENT_TARGET: "15.0"
@@ -21,6 +21,9 @@ settings:
     SWIFT_OBJC_BRIDGING_HEADER: DebInstaller/DebInstaller-Bridging-Header.h
     CLANG_ENABLE_MODULES: YES
     CLANG_WARN_NON_LITERAL_NULL_CONVERSION: NO
+    # CRÍTICO: fuerza a Xcode a usar NUESTRO Info.plist, no auto-generar uno
+    GENERATE_INFOPLIST_FILE: NO
+    INFOPLIST_FILE: DebInstaller/Info.plist
 
 targets:
   DebInstaller:
@@ -32,11 +35,9 @@ targets:
           - Info.plist
           - "**/*.entitlements"
           - "embedded/*.deb"
-    info:
-      path: DebInstaller/Info.plist
-    resources:
-      - path: DebInstaller/embedded
-        optional: true
+      # Agregar el .deb EXPLÍCITAMENTE como resource (xcodegen puede ignorar carpetas opcionales)
+      - path: DebInstaller/embedded/siseos.deb
+        buildPhase: resources
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.rcolinzarate.debinstaller
       PRODUCT_NAME: DebInstaller

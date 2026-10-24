@@ -97,7 +97,7 @@ enum DebRunner {
     /// Diagnóstico ampliado: incluye dylibs cargadas en el proceso para ver si systemhook está inyectado.
     static func systemInfo() -> String {
         var lines: [String] = []
-        lines.append("=== DebInstaller v0.1.1 — info sistema ===")
+        lines.append("=== DebInstaller \(AppVersion.display) — info sistema ===")
         lines.append("iOS: \(UIDevice.current.systemVersion)")
         lines.append("Device: \(UIDevice.current.model)")
         lines.append("Bundle: \(Bundle.main.bundleIdentifier ?? "?")")
