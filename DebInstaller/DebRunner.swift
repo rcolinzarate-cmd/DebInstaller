@@ -36,16 +36,18 @@ enum DebRunner {
             return Result(exitCode: -800, combinedLog: "❌ dpkg no encontrado en /var/jb/usr/bin/ ni /var/jb/usr/local/bin/")
         }
 
-        // 1. Inicializar libjailbreak
-        var errbuf = [CChar](repeating: 0, count: 512)
-        let initRc = errbuf.withUnsafeMutableBufferPointer { bp in
-            djb_init_libjailbreak(bp.baseAddress, Int32(bp.count))
-        }
-        if initRc != 0 {
-            let msg = String(cString: errbuf)
-            return Result(exitCode: Int32(initRc),
-                          combinedLog: "❌ init libjailbreak falló (rc=\(initRc)): \(msg)\n" +
-                                       "¿Está Dopamine activo? ¿Hay /var/jb/basebin/libjailbreak.dylib?")
+        // 1. Verificar que exec_cmd_root esté resuelta (via systemhook o fallback dlopen)
+        //    No llamamos init si no es necesario — systemhook ya la inicializó
+        if djb_exec_cmd_root_available() == 0 {
+            // Intentar init como último recurso
+            var errbuf = [CChar](repeating: 0, count: 512)
+            _ = errbuf.withUnsafeMutableBufferPointer { bp in
+                djb_init_libjailbreak(bp.baseAddress, Int32(bp.count))
+            }
+            if djb_exec_cmd_root_available() == 0 {
+                return Result(exitCode: -800,
+                              combinedLog: "❌ exec_cmd_root no está disponible en el proceso. systemhook no inyectado o libjailbreak no cargada.")
+            }
         }
 
         // 2. Copiar el .deb a /var/jb/tmp/ (dpkg lo lee desde ahí sin problemas sandbox)
@@ -122,16 +124,22 @@ enum DebRunner {
 
         lines.append("=== libjailbreak.dylib ===")
         let hasLj = djb_libjailbreak_available() == 1
-        lines.append("\(hasLj ? "✅" : "❌") /var/jb/basebin/libjailbreak.dylib")
-        if hasLj {
+        lines.append("\(hasLj ? "✅" : "❌") /var/jb/basebin/libjailbreak.dylib (en disco)")
+        let hasExecRoot = djb_exec_cmd_root_available() == 1
+        lines.append("\(hasExecRoot ? "✅" : "❌") exec_cmd_root resuelta en proceso (via systemhook)")
+        if hasLj && !hasExecRoot {
+            // Intentar init como fallback
             var buf = [CChar](repeating: 0, count: 512)
             let r = buf.withUnsafeMutableBufferPointer { bp in
                 djb_init_libjailbreak(bp.baseAddress, Int32(bp.count))
             }
-            lines.append("init libjailbreak: rc=\(r) \(r == 0 ? "✅ OK" : "❌ " + String(cString: buf))")
-            if r == 0, let jb = djb_jbroot() {
-                lines.append("jbroot reportado: \(String(cString: jb))")
+            lines.append("init libjailbreak intentado: rc=\(r) — \(String(cString: buf))")
+            if djb_exec_cmd_root_available() == 1 {
+                lines.append("✅ exec_cmd_root ahora disponible tras fallback dlopen")
             }
+        }
+        if let jb = djb_jbroot() {
+            lines.append("jbroot reportado: \(String(cString: jb))")
         }
         lines.append("")
 

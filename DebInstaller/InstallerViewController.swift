@@ -90,7 +90,9 @@ final class InstallerViewController: UIViewController, UIDocumentPickerDelegate 
         container.addArrangedSubview(logView)
 
         let footer = UILabel()
-        footer.text = "v0.1.0 — rcolinzarate"
+        let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        footer.text = "DebInstaller v\(ver) (build \(build)) — rcolinzarate"
         footer.font = .preferredFont(forTextStyle: .caption2)
         footer.textColor = .tertiaryLabel
         footer.textAlignment = .center

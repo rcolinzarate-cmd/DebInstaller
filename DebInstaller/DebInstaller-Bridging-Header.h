@@ -20,4 +20,7 @@ const char* djb_jbroot(void);
 /// Verifica si libjailbreak.dylib existe en disco (sin cargarlo).
 int djb_libjailbreak_available(void);
 
+/// ¿Está exec_cmd_root ya cargada en el proceso (vía systemhook)?
+int djb_exec_cmd_root_available(void);
+
 #endif
