@@ -6,7 +6,7 @@
 import Foundation
 
 enum AppVersion {
-    static let marketing: String = "0.1.5"
-    static let build: String = "6"
+    static let marketing: String = "0.1.6"
+    static let build: String = "7"
     static var display: String { "v\(marketing) (build \(build))" }
 }
